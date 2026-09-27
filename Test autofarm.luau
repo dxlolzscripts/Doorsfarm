@@ -6,8 +6,40 @@ local CoreGui = game:GetService("CoreGui")
 local LocalPlayer = Players.LocalPlayer
 local Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
 
+-- Функция для подключения отслеживания смерти
+local function setupDeathListener(char)
+	local humanoid = char:WaitForChild("Humanoid", 5)
+	if humanoid then
+		humanoid.Died:Connect(function()
+			-- Когда персонаж умирает, вызываем PlayAgain 5 раз каждые 10 секунд
+			task.spawn(function()
+				local success, remotesFolder = pcall(function()
+					return ReplicatedStorage:WaitForChild("RemotesFolder", 3)
+				end)
+				
+				if success and remotesFolder then
+					local playAgainEvent = remotesFolder:FindFirstChild("PlayAgain")
+					if playAgainEvent then
+						for i = 1, 5 do
+							pcall(function()
+								playAgainEvent:FireServer()
+							end)
+							if i < 5 then
+								task.wait(10)
+							end
+						end
+					end
+				end
+			end)
+		end)
+	end
+end
+
+setupDeathListener(Character)
+
 LocalPlayer.CharacterAdded:Connect(function(newChar)
 	Character = newChar
+	setupDeathListener(newChar)
 end)
 
 -- Создание GUI на экране
@@ -125,7 +157,7 @@ local function getNextKeyObtain()
 	return bestKey
 end
 
--- Твой стабильный поиск закрытой двери
+-- Поиск закрытой двери
 local function getNextClosedDoor()
 	if not Character then return nil end
 
@@ -200,7 +232,30 @@ local function removeFrontDesk()
 	end
 end
 
--- Состояние через кастомный аналог Toggles
+-- Заморозка / разморозка движения персонажа
+local function setCharacterFrozen(frozen)
+	if not Character then return end
+	local humanoid = Character:FindFirstChildOfClass("Humanoid")
+	local rootPart = Character:FindFirstChild("HumanoidRootPart")
+	
+	if humanoid then
+		if frozen then
+			humanoid.WalkSpeed = 0
+			humanoid.JumpPower = 0
+			humanoid.AutoRotate = false
+		else
+			humanoid.WalkSpeed = 16
+			humanoid.JumpPower = 50
+			humanoid.AutoRotate = true
+		end
+	end
+	
+	if rootPart then
+		rootPart.Anchored = frozen
+	end
+end
+
+-- Состояние автофарма
 local AutoFarmState = { Value = false }
 local TpNextDoorConnection = nil
 local keyWasHandled = false
@@ -217,16 +272,18 @@ local function startAutomation()
 		while AutoFarmState.Value do
 			-- Проверка на 12 комнату
 			if getCurrentRoomNumber() >= 12 then
+				setCharacterFrozen(false)
 				resetCharacterCustom()
 				task.wait(2)
 				continue
 			end
 
-			-- 1. Обработка ключа, если он есть в поле зрения и у нас его нет
+			-- 1. Обработка ключа, если он есть и у нас его нет
 			local keyObj = getNextKeyObtain()
 			if keyObj and not hasKeyInInventory() then
 				keyWasHandled = false
 				while AutoFarmState.Value and getNextKeyObtain() and not hasKeyInInventory() do
+					setCharacterFrozen(true)
 					local currentKey = getNextKeyObtain()
 					if currentKey and Character then
 						local success, pivot = pcall(function()
@@ -242,12 +299,13 @@ local function startAutomation()
 						end
 						pressKeyE(5, 0.05)
 					end
-					task.wait(0.15)
+					task.wait(0.125)
 				end
 			end
 
-			-- 2. Если ключ появился в инвентаре — подходим к двери и открываем её (зажим E)
+			-- 2. Если ключ появился в инвентаре — подходим к двери и открываем её
 			if hasKeyInInventory() and not keyWasHandled then
+				setCharacterFrozen(true)
 				local door = getNextClosedDoor()
 				if door and Character then
 					Character:PivotTo(door:GetPivot())
@@ -257,16 +315,19 @@ local function startAutomation()
 				end
 			end
 
-			-- 3. Основной телепорт по закрытым дверям (как в твоем коде)
+			-- 3. Основной телепорт по закрытым дверям
 			if not hasKeyInInventory() then
+				setCharacterFrozen(true)
 				local door = getNextClosedDoor()
 				if door and Character then
 					Character:PivotTo(door:GetPivot())
 				end
 			end
 
-			task.wait(0.15)
+			task.wait(0.125)
 		end
+		
+		setCharacterFrozen(false)
 		TpNextDoorConnection = nil
 	end)
 end
@@ -282,6 +343,7 @@ ToggleButton.MouseButton1Click:Connect(function()
 	else
 		ToggleButton.Text = "Auto Farm: OFF"
 		ToggleButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+		setCharacterFrozen(false)
 		if TpNextDoorConnection then
 			task.cancel(TpNextDoorConnection)
 			TpNextDoorConnection = nil
