@@ -2,16 +2,165 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local VirtualInputManager = game:GetService("VirtualInputManager")
 local CoreGui = game:GetService("CoreGui")
+local HttpService = game:GetService("HttpService")
 
 local LocalPlayer = Players.LocalPlayer
 local Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
 
--- Функция для подключения отслеживания смерти
+-- Система сохранения конфигурации
+local CONFIG_FILE = "UltimateAutoFarm_Config.json"
+local ConfigData = {
+	AutoFarmEnabled = false,
+	IgnoreList = { "Glitch Fragments", "Jeff Items", "Dropped Items" }
+}
+
+local function saveConfig()
+	local success, encoded = pcall(function()
+		return HttpService:JSONEncode(ConfigData)
+	end)
+	if success then
+		pcall(function()
+			writefile(CONFIG_FILE, encoded)
+		end)
+	end
+end
+
+local function loadConfig()
+	local success, decoded = pcall(function()
+		if isfile and isfile(CONFIG_FILE) then
+			return HttpService:JSONDecode(readfile(CONFIG_FILE))
+		end
+	end)
+	if success and type(decoded) == "table" then
+		for k, v in pairs(decoded) do
+			ConfigData[k] = v
+		end
+	end
+end
+
+loadConfig()
+
+-- Глобальные таблицы для совместимости
+local Toggles = getgenv().Toggles or { AutoInteractToggle = { Value = false } }
+local Options = getgenv().Options or { PromptReachSlider = { Value = 1 } }
+local Groupboxes = getgenv().Groupboxes or {}
+local Globals = getgenv().Globals or {}
+local Functions = getgenv().Functions or {}
+local Connections = getgenv().Connections or {}
+local Objects = getgenv().Objects or { Prompts = {} }
+local FakePrompts = getgenv().FakePrompts or {}
+local Floor = getgenv().Floor or "Hotel"
+
+-- Добавление элементов UI (Ignore List)
+pcall(function()
+	if Groupboxes.Self_Automation then
+		Groupboxes.Self_Automation:AddDropdown("AutoInteractIgnoreList", {
+			Text = "Ignore List",
+			Values = { "Glitch Fragments", "Jeff Items", "Dropped Items", "Currency", "Minecarts", "Locks" },
+			Default = ConfigData.IgnoreList,
+			Multi = true,
+			AllowNull = true,
+			Callback = function(value)
+				ConfigData.IgnoreList = value
+				saveConfig()
+			end
+		})
+	end
+end)
+
+-- Функция для обработки промптов
+local function setupPrompt(Object)
+	if Object.ClassName == "ProximityPrompt" and not Object:GetAttribute("FakePrompt") then
+		if Object:HasTag("DisableWhenEnabledOnClient") then Object:RemoveTag("DisableWhenEnabledOnClient") end
+
+		Object:SetAttribute("HoldDuration_Old", Object.HoldDuration)
+		Object:SetAttribute("RequiresLineOfSight_Old", Object.RequiresLineOfSight)
+		Object:SetAttribute("MaxActivationDistance_Old", Object.MaxActivationDistance)
+
+		if Toggles.InstantPrompts and Toggles.InstantPrompts.Value then Object.HoldDuration = 0 end
+		if Toggles.PromptClip and Toggles.PromptClip.Value then Object.RequiresLineOfSight = false end
+		if Options.PromptReachSlider then
+			Object.MaxActivationDistance = Object:GetAttribute("MaxActivationDistance_Old") * Options.PromptReachSlider.Value
+		end
+
+		local LockPromptNames = { UnlockPrompt=true, SkullPrompt=true, LockPrompt=true, ThingToEnable=true, FusesPrompt=true }
+
+		local checkCompat = type(Functions.CheckCompatability) == "function" and Functions.CheckCompatability({"fireproximityprompt"})
+		if checkCompat and Floor ~= "OldHotel" and Floor ~= "Fools" then
+			local IsLockPrompt = LockPromptNames[Object.Name]
+				or (Object.Parent and Object.Parent:GetAttribute("Locked") == true)
+				or (Object.Parent and Object.Parent.Parent and Object.Parent.Parent.Name == "Locker_Small_Locked" and Object.Name == "ActivateEventPrompt")
+
+			if IsLockPrompt then
+				local FakePrompt = Object:Clone()
+				FakePrompt:SetAttribute("FakePrompt", true)
+				task.wait()
+				FakePrompt.Parent = Object.Parent
+
+				FakePrompt:SetAttribute("HoldDuration_Old", Object:GetAttribute("HoldDuration_Old"))
+				FakePrompt:SetAttribute("RequiresLineOfSight_Old", Object:GetAttribute("RequiresLineOfSight_Old"))
+				FakePrompt:SetAttribute("MaxActivationDistance_Old", Object:GetAttribute("MaxActivationDistance_Old"))
+
+				FakePrompt.HoldDuration = Object.HoldDuration
+				FakePrompt.RequiresLineOfSight = Object.RequiresLineOfSight
+				FakePrompt.MaxActivationDistance = Object.MaxActivationDistance
+
+				if Toggles.InstantPrompts and Toggles.InstantPrompts.Value then FakePrompt.HoldDuration = 0 end
+				if Toggles.PromptClip and Toggles.PromptClip.Value then FakePrompt.RequiresLineOfSight = false end
+				if Options.PromptReachSlider then
+					FakePrompt.MaxActivationDistance = FakePrompt:GetAttribute("MaxActivationDistance_Old") * Options.PromptReachSlider.Value
+				end
+
+				FakePrompts[FakePrompt] = Object
+				pcall(function() Object.Parent = Globals.PromptContainer end)
+
+				local FPEnabledConn = Object:GetPropertyChangedSignal("Enabled"):Connect(function()
+					FakePrompt.Enabled = Object.Enabled
+				end)
+				Object:GetPropertyChangedSignal("ActionText"):Once(function()
+					Object.Parent = FakePrompt.Parent
+					FakePrompt:Destroy()
+					FPEnabledConn:Disconnect()
+				end)
+				Object.Destroying:Once(function()
+					FakePrompt:Destroy()
+					FPEnabledConn:Disconnect()
+				end)
+				table.insert(Connections, FPEnabledConn)
+				table.insert(Objects.Prompts, FakePrompt)
+
+				FakePrompt.Enabled = false
+				task.wait()
+				FakePrompt.Enabled = Object.Enabled
+			end
+		end
+	end
+end
+
+workspace.DescendantAdded:Connect(function(obj)
+	setupPrompt(obj)
+end)
+
+for _, obj in ipairs(workspace:GetDescendants()) do
+	setupPrompt(obj)
+end
+
+-- Отслеживание уничтожения объектов
+local function monitorObjectDestruction(Object, ElevConn)
+	if Object then
+		Object.Destroying:Once(function()
+			if ElevConn and typeof(ElevConn.Disconnect) == "function" then
+				pcall(function() ElevConn:Disconnect() end)
+			end
+		end)
+	end
+end
+
+-- Отслеживание смерти для PlayAgain
 local function setupDeathListener(char)
 	local humanoid = char:WaitForChild("Humanoid", 5)
 	if humanoid then
 		humanoid.Died:Connect(function()
-			-- Когда персонаж умирает, вызываем PlayAgain 5 раз каждые 10 секунд
 			task.spawn(function()
 				local success, remotesFolder = pcall(function()
 					return ReplicatedStorage:WaitForChild("RemotesFolder", 3)
@@ -84,7 +233,7 @@ local ToggleCorner = Instance.new("UICorner")
 ToggleCorner.CornerRadius = UDim.new(0, 6)
 ToggleCorner.Parent = ToggleButton
 
--- Эмуляция кликов/зажима клавиши E
+-- Эмуляция нажатий
 local function pressKeyE(times, delayBetween)
 	for i = 1, times or 1 do
 		VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
@@ -102,7 +251,6 @@ local function holdKeyE(duration)
 	VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game)
 end
 
--- Проверка инвентаря на наличие ключа
 local function hasKeyInInventory()
 	local char = LocalPlayer.Character
 	if char and (char:FindFirstChild("Key") or char:FindFirstChild("KeyObtain")) then
@@ -117,7 +265,6 @@ local function hasKeyInInventory()
 	return false
 end
 
--- Поиск комнаты для ключа
 local function getRoomNumberFromItem(item)
 	local current = item.Parent
 	while current and current ~= workspace do
@@ -157,7 +304,6 @@ local function getNextKeyObtain()
 	return bestKey
 end
 
--- Поиск закрытой двери
 local function getNextClosedDoor()
 	if not Character then return nil end
 
@@ -189,16 +335,15 @@ local function getNextClosedDoor()
 	return bestDoor
 end
 
--- Сброс для 12 комнаты
 local function resetCharacterCustom()
-	local Globals = getgenv().Globals or {}
-	local Functions = getgenv().Functions or {}
+	local GlobalsEnv = getgenv().Globals or {}
+	local FunctionsEnv = getgenv().Functions or {}
 	local Abysall = getgenv().Abysall
 	local RemotesFolder = ReplicatedStorage:FindFirstChild("Remotes") or ReplicatedStorage
 	local humanoid = Character and Character:FindFirstChildOfClass("Humanoid")
 
-	Globals.SelfKilled = true
-	if type(Functions.CheckCompatability) == "function" and Functions.CheckCompatability({"replicatesignal"}) and Abysall and Abysall.Environment then
+	GlobalsEnv.SelfKilled = true
+	if type(FunctionsEnv.CheckCompatability) == "function" and FunctionsEnv.CheckCompatability({"replicatesignal"}) and Abysall and Abysall.Environment then
 		pcall(function()
 			Abysall.Environment.replicatesignal(LocalPlayer.Kill)
 		end)
@@ -232,7 +377,6 @@ local function removeFrontDesk()
 	end
 end
 
--- Заморозка / разморозка движения персонажа
 local function setCharacterFrozen(frozen)
 	if not Character then return end
 	local humanoid = Character:FindFirstChildOfClass("Humanoid")
@@ -255,7 +399,7 @@ local function setCharacterFrozen(frozen)
 	end
 end
 
--- Состояние автофарма
+-- Автофарм с task.wait(0.125)
 local AutoFarmState = { Value = false }
 local TpNextDoorConnection = nil
 local keyWasHandled = false
@@ -270,7 +414,6 @@ local function startAutomation()
 
 	TpNextDoorConnection = task.spawn(function()
 		while AutoFarmState.Value do
-			-- Проверка на 12 комнату
 			if getCurrentRoomNumber() >= 12 then
 				setCharacterFrozen(false)
 				resetCharacterCustom()
@@ -278,7 +421,6 @@ local function startAutomation()
 				continue
 			end
 
-			-- 1. Обработка ключа, если он есть и у нас его нет
 			local keyObj = getNextKeyObtain()
 			if keyObj and not hasKeyInInventory() then
 				keyWasHandled = false
@@ -303,7 +445,6 @@ local function startAutomation()
 				end
 			end
 
-			-- 2. Если ключ появился в инвентаре — подходим к двери и открываем её
 			if hasKeyInInventory() and not keyWasHandled then
 				setCharacterFrozen(true)
 				local door = getNextClosedDoor()
@@ -315,7 +456,6 @@ local function startAutomation()
 				end
 			end
 
-			-- 3. Основной телепорт по закрытым дверям
 			if not hasKeyInInventory() then
 				setCharacterFrozen(true)
 				local door = getNextClosedDoor()
@@ -332,10 +472,13 @@ local function startAutomation()
 	end)
 end
 
-ToggleButton.MouseButton1Click:Connect(function()
-	AutoFarmState.Value = not AutoFarmState.Value
+-- Переключение кнопки автофарма
+local function setAutoFarmActive(state)
+	AutoFarmState.Value = state
+	ConfigData.AutoFarmEnabled = state
+	saveConfig()
 	
-	if AutoFarmState.Value then
+	if state then
 		ToggleButton.Text = "Auto Farm: ON"
 		ToggleButton.BackgroundColor3 = Color3.fromRGB(50, 200, 50)
 		keyWasHandled = false
@@ -349,4 +492,16 @@ ToggleButton.MouseButton1Click:Connect(function()
 			TpNextDoorConnection = nil
 		end
 	end
+end
+
+ToggleButton.MouseButton1Click:Connect(function()
+	setAutoFarmActive(not AutoFarmState.Value)
 end)
+
+-- Авто-включение при загрузке, если было включено ранее
+if ConfigData.AutoFarmEnabled then
+	task.defer(function()
+		task.wait(1)
+		setAutoFarmActive(true)
+	end)
+end
